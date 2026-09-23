@@ -20,7 +20,6 @@ from core.plugin.impl.model_runtime_factory import create_plugin_model_assembly
 from core.prompt.entities.advanced_prompt_entities import MemoryConfig
 from core.workflow.node_runtime import DifyFileReferenceFactory, DifyToolFileManager
 from core.workflow.system_variables import default_system_variables
-from graphon.entities import GraphInitParams
 from graphon.file import File, FileTransferMethod, FileType
 from graphon.model_runtime.entities.common_entities import I18nObject
 from graphon.model_runtime.entities.llm_entities import (
@@ -74,18 +73,19 @@ from graphon.nodes.llm.exc import (
     VariableNotFoundError,
 )
 from graphon.nodes.llm.file_saver import FileSaverImpl, LLMFileSaver
-from graphon.nodes.llm.node import (
-    LLMNode,
-    _calculate_rest_token,
-    _handle_completion_template,
-    _handle_memory_chat_mode,
-    _handle_memory_completion_mode,
-    _render_jinja2_message,
+from graphon.nodes.llm.llm_utils import (
+    calculate_rest_token,
+    handle_completion_template,
+    handle_list_messages,
+    handle_memory_chat_mode,
+    handle_memory_completion_mode,
+    render_jinja2_message,
 )
+from graphon.nodes.llm.node import LLMNode
 from graphon.nodes.llm.protocols import CredentialsProvider, ModelFactory
 from graphon.nodes.llm.reasoning import split_reasoning
 from graphon.nodes.llm.runtime_protocols import PromptMessageSerializerProtocol
-from graphon.runtime import GraphRuntimeState, VariablePool
+from graphon.runtime import InitParams, RuntimeState, VariablePool
 from graphon.template_rendering import TemplateRenderError
 from graphon.variables import ArrayAnySegment, ArrayFileSegment, NoneSegment
 from models.provider import ProviderType
@@ -194,7 +194,7 @@ def llm_node_data() -> LLMNodeData:
 
 
 @pytest.fixture
-def graph_init_params() -> GraphInitParams:
+def graph_init_params() -> InitParams:
     return build_test_graph_init_params(
         workflow_id="1",
         graph_config={},
@@ -208,21 +208,20 @@ def graph_init_params() -> GraphInitParams:
 
 
 @pytest.fixture
-def graph_runtime_state() -> GraphRuntimeState:
+def graph_runtime_state() -> RuntimeState:
     variable_pool = VariablePool.from_bootstrap(
         system_variables=default_system_variables(),
         user_inputs={},
     )
-    return GraphRuntimeState(
+    return RuntimeState(
+        workflow_id="test-workflow",
         variable_pool=variable_pool,
         start_at=0,
     )
 
 
 @pytest.fixture
-def llm_node(
-    llm_node_data: LLMNodeData, graph_init_params: GraphInitParams, graph_runtime_state: GraphRuntimeState
-) -> LLMNode:
+def llm_node(llm_node_data: LLMNodeData, graph_init_params: InitParams, graph_runtime_state: RuntimeState) -> LLMNode:
     file_saver = _build_file_saver()
     mock_credentials_provider = mock.MagicMock(spec=CredentialsProvider)
     mock_model_factory = mock.MagicMock(spec=ModelFactory)
@@ -231,8 +230,8 @@ def llm_node(
     node = LLMNode(
         node_id="1",
         data=llm_node_data,
-        graph_init_params=graph_init_params,
-        graph_runtime_state=graph_runtime_state,
+        init_params=graph_init_params,
+        runtime_state=graph_runtime_state,
         credentials_provider=mock_credentials_provider,
         model_factory=mock_model_factory,
         model_instance=_build_prepared_llm_mock(),
@@ -600,7 +599,7 @@ def test_fetch_files_with_non_existent_variable():
 #     memory_config=None,
 #     vision_enabled=False,
 #     vision_detail=fake_vision_detail,
-#     variable_pool=llm_node.graph_runtime_state.variable_pool,
+#     variable_pool=llm_node.runtime_state.variable_pool,
 #     jinja2_variables=[],
 # )
 
@@ -776,7 +775,7 @@ def test_fetch_files_with_non_existent_variable():
 
 #     for k, v in scenario.file_variables.items():
 #         selector = k.split(".")
-#         llm_node.graph_runtime_state.variable_pool.add(selector, v)
+#         llm_node.runtime_state.variable_pool.add(selector, v)
 
 #     # Call the method under test
 #     prompt_messages, _ = llm_node._fetch_prompt_messages(
@@ -789,7 +788,7 @@ def test_fetch_files_with_non_existent_variable():
 #         memory_config=memory_config,
 #         vision_enabled=scenario.vision_enabled,
 #         vision_detail=scenario.vision_detail,
-#         variable_pool=llm_node.graph_runtime_state.variable_pool,
+#         variable_pool=llm_node.runtime_state.variable_pool,
 #         jinja2_variables=[],
 #     )
 
@@ -810,10 +809,10 @@ def test_handle_list_messages_basic(llm_node):
     ]
     context = "world"
     jinja2_variables = []
-    variable_pool = llm_node.graph_runtime_state.variable_pool
+    variable_pool = llm_node.runtime_state.variable_pool
     vision_detail_config = ImagePromptMessageContent.DETAIL.HIGH
 
-    result = llm_node.handle_list_messages(
+    result = handle_list_messages(
         messages=messages,
         context=context,
         jinja2_variables=jinja2_variables,
@@ -836,11 +835,11 @@ def test_handle_list_messages_replaces_double_brace_context_placeholder(llm_node
     ]
     context = "## Overview\nSends a JSON request."
 
-    result = llm_node.handle_list_messages(
+    result = handle_list_messages(
         messages=messages,
         context=context,
         jinja2_variables=[],
-        variable_pool=llm_node.graph_runtime_state.variable_pool,
+        variable_pool=llm_node.runtime_state.variable_pool,
         vision_detail_config=ImagePromptMessageContent.DETAIL.HIGH,
     )
 
@@ -854,11 +853,11 @@ def test_handle_list_messages_replaces_double_brace_context_placeholder(llm_node
 
 
 def test_handle_list_messages_renders_jinja2_messages(llm_node):
-    llm_node.graph_runtime_state.variable_pool.add(["input", "name"], "Dify")
+    llm_node.runtime_state.variable_pool.add(["input", "name"], "Dify")
     renderer = mock.MagicMock()
     renderer.render_template.return_value = "Hello Dify"
 
-    prompt_messages = llm_node.handle_list_messages(
+    prompt_messages = handle_list_messages(
         messages=[
             LLMNodeChatModelMessage(
                 text="ignored",
@@ -869,7 +868,7 @@ def test_handle_list_messages_renders_jinja2_messages(llm_node):
         ],
         context="",
         jinja2_variables=[VariableSelector(variable="name", value_selector=["input", "name"])],
-        variable_pool=llm_node.graph_runtime_state.variable_pool,
+        variable_pool=llm_node.runtime_state.variable_pool,
         vision_detail_config=ImagePromptMessageContent.DETAIL.HIGH,
         jinja2_template_renderer=renderer,
     )
@@ -909,15 +908,15 @@ def test_transform_chat_messages_prefers_jinja2_text(llm_node):
 
 
 def test_fetch_jinja_inputs_serializes_supported_segment_types(llm_node):
-    llm_node.graph_runtime_state.variable_pool.add(
+    llm_node.runtime_state.variable_pool.add(
         ["input", "items"],
         ["alpha", {"metadata": {"_source": "knowledge"}, "content": "beta"}, 3],
     )
-    llm_node.graph_runtime_state.variable_pool.add(
+    llm_node.runtime_state.variable_pool.add(
         ["input", "context_doc"],
         {"metadata": {"_source": "knowledge"}, "content": "context body"},
     )
-    llm_node.graph_runtime_state.variable_pool.add(["input", "payload"], {"a": 1})
+    llm_node.runtime_state.variable_pool.add(["input", "payload"], {"a": 1})
 
     node_data = llm_node.node_data.model_copy(
         update={
@@ -952,8 +951,8 @@ def test_fetch_jinja_inputs_raises_for_missing_variable(llm_node):
 
 
 def test_fetch_inputs_collects_prompt_and_memory_variables(llm_node):
-    llm_node.graph_runtime_state.variable_pool.add(["input", "name"], "Dify")
-    llm_node.graph_runtime_state.variable_pool.add(["input", "payload"], {"active": True})
+    llm_node.runtime_state.variable_pool.add(["input", "name"], "Dify")
+    llm_node.runtime_state.variable_pool.add(["input", "payload"], {"active": True})
 
     node_data = llm_node.node_data.model_copy(
         update={
@@ -979,7 +978,7 @@ def test_fetch_inputs_collects_prompt_and_memory_variables(llm_node):
 
 
 def test_fetch_context_emits_string_context_event(llm_node):
-    llm_node.graph_runtime_state.variable_pool.add(["context", "value"], "retrieved context")
+    llm_node.runtime_state.variable_pool.add(["context", "value"], "retrieved context")
     node_data = llm_node.node_data.model_copy(
         update={"context": ContextConfig(enabled=True, variable_selector=["context", "value"])}
     )
@@ -1000,7 +999,7 @@ def test_fetch_context_collects_retriever_resources_and_attachments(llm_node):
     llm_node._retriever_attachment_loader = mock.MagicMock()
     llm_node._retriever_attachment_loader.load.return_value = [attachment]
 
-    llm_node.graph_runtime_state.variable_pool.add(
+    llm_node.runtime_state.variable_pool.add(
         ["context", "value"],
         [
             {
@@ -1053,7 +1052,7 @@ def test_fetch_context_collects_retriever_resources_and_attachments(llm_node):
 
 
 def test_fetch_context_rejects_invalid_context_structure(llm_node):
-    llm_node.graph_runtime_state.variable_pool.add(["context", "value"], [{"summary": "missing content"}])
+    llm_node.runtime_state.variable_pool.add(["context", "value"], [{"summary": "missing content"}])
     node_data = llm_node.node_data.model_copy(
         update={"context": ContextConfig(enabled=True, variable_selector=["context", "value"])}
     )
@@ -1091,7 +1090,7 @@ def test_fetch_prompt_messages_chat_mode_appends_memory_query_and_files(mocker: 
         ),
     ]
 
-    with mock.patch("graphon.nodes.llm.node.file_manager.to_prompt_message_content") as mock_to_prompt:
+    with mock.patch("graphon.nodes.llm.llm_utils.file_manager.to_prompt_message_content") as mock_to_prompt:
         mock_to_prompt.side_effect = prompt_content_side_effect
         prompt_messages, stop = LLMNode.fetch_prompt_messages(
             sys_query="current question",
@@ -1183,7 +1182,7 @@ def test_fetch_prompt_messages_raises_when_only_unsupported_content_remains():
 
     with (
         mock.patch(
-            "graphon.nodes.llm.node.file_manager.to_prompt_message_content",
+            "graphon.nodes.llm.llm_utils.file_manager.to_prompt_message_content",
             return_value=ImagePromptMessageContent(
                 url="https://example.com/file.png",
                 format="png",
@@ -1216,14 +1215,14 @@ def test_fetch_prompt_messages_raises_when_only_unsupported_content_remains():
 
 
 def test_handle_completion_template_replaces_double_brace_context_placeholder(llm_node):
-    prompt_messages = _handle_completion_template(
+    prompt_messages = handle_completion_template(
         template=LLMNodeCompletionModelPromptTemplate(
             text="Summarize the following context:\n{{#context#}}",
             edition_type="basic",
         ),
         context="## Overview\nSends a JSON request.",
         jinja2_variables=[],
-        variable_pool=llm_node.graph_runtime_state.variable_pool,
+        variable_pool=llm_node.runtime_state.variable_pool,
         jinja2_template_renderer=None,
     )
 
@@ -1261,8 +1260,8 @@ def test_handle_memory_completion_mode_uses_prompt_message_interface(mocker: Moc
         window=MemoryConfig.WindowConfig(enabled=True, size=3),
     )
 
-    with mock.patch("graphon.nodes.llm.node._calculate_rest_token", return_value=2000) as mock_rest_token:
-        memory_text = _handle_memory_completion_mode(
+    with mock.patch("graphon.nodes.llm.llm_utils.calculate_rest_token", return_value=2000) as mock_rest_token:
+        memory_text = handle_memory_completion_mode(
             memory=memory,
             memory_config=memory_config,
             model_instance=model_instance,
@@ -1283,8 +1282,8 @@ def llm_node_for_multimodal(llm_node_data, graph_init_params, graph_runtime_stat
     node = LLMNode(
         node_id="1",
         data=llm_node_data,
-        graph_init_params=graph_init_params,
-        graph_runtime_state=graph_runtime_state,
+        init_params=graph_init_params,
+        runtime_state=graph_runtime_state,
         credentials_provider=mock_credentials_provider,
         model_factory=mock_model_factory,
         model_instance=_build_prepared_llm_mock(),
@@ -1318,9 +1317,6 @@ class TestLLMNodeSaveMultiModalImageOutput:
             content=content,
             file_saver=mock_file_saver,
         )
-        # Manually append to _file_outputs since the static method doesn't do it
-        llm_node._file_outputs.append(file)
-        assert llm_node._file_outputs == [mock_file]
         assert file == mock_file
         mock_file_saver.save_binary_string.assert_called_once_with(
             data=b"test-data",
@@ -1351,9 +1347,6 @@ class TestLLMNodeSaveMultiModalImageOutput:
             content=content,
             file_saver=mock_file_saver,
         )
-        # Manually append to _file_outputs since the static method doesn't do it
-        llm_node._file_outputs.append(file)
-        assert llm_node._file_outputs == [mock_file]
         assert file == mock_file
         mock_file_saver.save_remote_url.assert_called_once_with(content.url, FileType.IMAGE)
 
@@ -1407,6 +1400,7 @@ class TestSaveMultimodalOutputAndConvertResultToMarkdown:
             storage_key="test_storage_key",
         )
         mock_file_saver.save_binary_string.return_value = mock_saved_file
+        file_outputs: list[File] = []
         gen = llm_node._save_multimodal_output_and_convert_result_to_markdown(
             contents=[
                 ImagePromptMessageContent(
@@ -1416,7 +1410,7 @@ class TestSaveMultimodalOutputAndConvertResultToMarkdown:
                 )
             ],
             file_saver=mock_file_saver,
-            file_outputs=llm_node._file_outputs,
+            file_outputs=file_outputs,
         )
         yielded_strs = list(gen)
         assert len(yielded_strs) == 1
@@ -1436,7 +1430,7 @@ class TestSaveMultimodalOutputAndConvertResultToMarkdown:
             file_type=FileType.IMAGE,
             extension_override=".png",
         )
-        assert mock_saved_file in llm_node._file_outputs
+        assert mock_saved_file in file_outputs
 
     def test_unknown_content_type(self, llm_node_for_multimodal):
         llm_node, mock_file_saver = llm_node_for_multimodal
@@ -1653,7 +1647,7 @@ def test_handle_invoke_result_wraps_structured_output_parse_errors():
         raise ValueError("bad json")
         yield
 
-    with pytest.raises(LLMNodeError, match="Failed to parse structured output: bad json"):
+    with pytest.raises(LLMNodeError, match=r"Failed to parse structured output \(stage=result, path=\$\): bad json"):
         list(
             LLMNode.handle_invoke_result(
                 invoke_result=broken_stream(),
@@ -1693,10 +1687,10 @@ def test_fetch_structured_output_schema_validates_payload():
         "type": "object"
     }
 
-    with pytest.raises(LLMNodeError, match="Please provide a valid structured output schema"):
+    with pytest.raises(LLMNodeError, match=r"Invalid structured output schema \(stage=schema, path=\$\.schema\)"):
         LLMNode.fetch_structured_output_schema(structured_output={})
 
-    with pytest.raises(LLMNodeError, match="structured_output_schema must be a JSON object"):
+    with pytest.raises(LLMNodeError, match=r"Invalid structured output schema \(stage=schema, path=\$\.schema\)"):
         LLMNode.fetch_structured_output_schema(structured_output={"schema": ["not", "an", "object"]})
 
 
@@ -1750,9 +1744,9 @@ def test_render_jinja2_message_requires_renderer_and_passes_inputs():
 
     with pytest.raises(
         TemplateRenderError,
-        match="LLMNode requires an injected jinja2_template_renderer for jinja2 prompts",
+        match="LLM prompts require an injected jinja2_template_renderer",
     ):
-        _render_jinja2_message(
+        render_jinja2_message(
             template="Hello {{ name }}",
             jinja2_variables=variables,
             variable_pool=variable_pool,
@@ -1763,7 +1757,7 @@ def test_render_jinja2_message_requires_renderer_and_passes_inputs():
     renderer.render_template.return_value = "Hello Dify"
 
     assert (
-        _render_jinja2_message(
+        render_jinja2_message(
             template="Hello {{ name }}",
             jinja2_variables=variables,
             variable_pool=variable_pool,
@@ -1790,7 +1784,7 @@ def test_calculate_rest_token_uses_context_size_and_max_tokens():
     model_instance.get_llm_num_tokens.return_value = 1000
 
     assert (
-        _calculate_rest_token(
+        calculate_rest_token(
             prompt_messages=[UserPromptMessage(content="hello")],
             model_instance=model_instance,
         )
@@ -1803,8 +1797,8 @@ def test_handle_memory_chat_mode_uses_calculated_token_budget(mocker: MockerFixt
     memory = MockTokenBufferMemory(history)
     history_lookup = mocker.spy(memory, "get_history_prompt_messages")
 
-    with mock.patch("graphon.nodes.llm.node._calculate_rest_token", return_value=321) as mock_rest_token:
-        result = _handle_memory_chat_mode(
+    with mock.patch("graphon.nodes.llm.llm_utils.calculate_rest_token", return_value=321) as mock_rest_token:
+        result = handle_memory_chat_mode(
             memory=memory,
             memory_config=MemoryConfig(window=MemoryConfig.WindowConfig(enabled=True, size=2)),
             model_instance=_build_prepared_llm_mock(),
